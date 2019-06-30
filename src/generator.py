@@ -1,8 +1,8 @@
 import torch
 
-class Transformer(torch.nn.Module):
+class Generator(torch.nn.Module):
     def __init__(self):
-        super(Transformer, self).__init__()
+        super(Generator, self).__init__()
 
         kernel_size = 3
         upsample = 2
@@ -99,14 +99,12 @@ class Decoder(torch.nn.Module):
 
     def forward(self, input):
         x = input
-        if self.upsample:
-            x = torch.nn.functional.interpolate(x, mode='nearest', scale_factor=self.upsample)
+        x = torch.nn.functional.interpolate(x, mode='nearest', scale_factor=self.upsample)
         x = self.ref_pad1(x)
         x = self.conv1(x)
         x = self.inst1(x)
         x = self.relu(x)
-        if self.upsample:
-            x = torch.nn.functional.interpolate(x, mode='nearest', scale_factor=self.upsample)
+        x = torch.nn.functional.interpolate(x, mode='nearest', scale_factor=self.upsample)
         x = self.ref_pad2(x)
         x = self.conv2(x)
         x = self.inst2(x)
