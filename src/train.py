@@ -1,127 +1,86 @@
-import argparse
-import os
-import sys
-import time
-import re
+import os, time
 
 import numpy as np
+from PIL import Image
 import torch
 from torch.optim import Adam
 from torch.utils.data import DataLoader
-from torchvision import datasets
-from torchvision import transforms
+from torchvision import datasets, transforms
 
-from generator import Generator
-
-class Vgg16(torch.nn.Module):
-    def __init__(self):
-        super(Vgg16, self).__init__()
-        vgg_pretrained_features = models.vgg16(pretrained=True).features
-        self.slice1 = torch.nn.Sequential()
-        self.slice2 = torch.nn.Sequential()
-        self.slice3 = torch.nn.Sequential()
-        self.slice4 = torch.nn.Sequential()
-        for x in range(4):
-            self.slice1.add_module(str(x), vgg_pretrained_features[x])
-        for x in range(4, 9):
-            self.slice2.add_module(str(x), vgg_pretrained_features[x])
-        for x in range(9, 16):
-            self.slice3.add_module(str(x), vgg_pretrained_features[x])
-        for x in range(16, 23):
-            self.slice4.add_module(str(x), vgg_pretrained_features[x])
-        for param in self.parameters():
-            param.requires_grad = False
-
-    def forward(self, X):
-        h = self.slice1(X)
-        h_relu1_2 = h
-        h = self.slice2(h)
-        h_relu2_2 = h
-        h = self.slice3(h)
-        h_relu3_3 = h
-        h = self.slice4(h)
-        h_relu4_3 = h
-        return (h_relu1_2, h_relu2_2, h_relu3_3, h_relu4_3)
-
-def compute_gram_matrix(y):
-    (batch_size, channels, height, width) = y.size()
-    features = y.view(batch_size, channels, width * height)
-    features_t = features.transpose(1, 2)
-    gram = features.bmm(features_t) / (channels * height * width)
+from options import Options
+from networks import Generator, Vgg16
+"""
+Required args: --cuda, --data_dir, --save_model_dir, --style_image
+"""
+def compute_gram_matrix(activations):
+    (batch_size, channels, height, width) = activations.size()
+    features = activations.view(batch_size, channels, height * width)
+    features_trans = features.transpose(1, 2)
+    gram = features.bmm(features_trans) / (channels * height * width)
     return gram
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if args.cuda else "cpu")
-    transform = transforms.Compose([
-        transforms.Resize(args.image_size),
-        transforms.CenterCrop(args.image_size),
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x.mul(255))
-    ])
-    train_dataset = datasets.ImageFolder(args.dataset, transform)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size)
+    opt = Options().parse(training=True)
+    device = torch.device("cuda" if opt.cuda else "cpu")
 
-    transformer = TransformerNet().to(device)
-    optimizer = Adam(transformer.parameters(), args.lr)
+    generator = Generator(opt).to(device)
+    optimizer = Adam(generator.parameters(), opt.learning_rate)
     mse_loss = torch.nn.MSELoss()
+    vgg = Vgg16().to(device)
 
-    vgg = Vgg16(requires_grad=False).to(device)
+    normalise = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Imagenet mean and std
+    transform = transforms.Compose([
+        transforms.Resize(opt.image_size), # Keeps original aspect ratio
+        transforms.CenterCrop(opt.image_size), # Forces images to be square
+        transforms.ToTensor(),
+        normalise
+        ])
+    train_dataset = datasets.ImageFolder(opt.data_dir, transform)
+    # Use batch_size parallel workers to load the data, and use pinned memory to speed up transfer of data to GPU.
+    train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, num_workers=opt.batch_size, pin_memory=True)
+
     style_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Lambda(lambda x: x.mul(255))
-    ])
-    style = utils.load_image(args.style_image, size=args.style_size)
-    style = style_transform(style)
-    style = style.repeat(args.batch_size, 1, 1, 1).to(device)
+        normalise
+        ])
+    style = style_transform(Image.open(opt.style_image))
+    style = style.repeat(opt.batch_size, 1, 1, 1).to(device)
 
-    features_style = vgg(utils.normalize_batch(style))
-    gram_style = [utils.compute_gram_matrix(y) for y in features_style]
+    features_style = vgg(style)
+    gram_style_tuple = [compute_gram_matrix(y) for y in features_style]
 
-    for e in range(args.epochs):
-        transformer.train()
-        agg_content_loss = 0.
-        agg_style_loss = 0.
-        count = 0
-        for batch_id, (x, _) in enumerate(train_loader):
-            n_batch = len(x)
-            count += n_batch
+    for epoch in range(opt.epochs):
+        generator.train() # Set training = True, only used by BatchNorm/InstanceNorm/Dropout
+        img_count = 0
+        for batch_id, (x, _) in enumerate(train_loader): # _ is index of subfolder in data dir
+            num_in_batch = len(x)
+            img_count += num_in_batch
             optimizer.zero_grad()
+            x = x.to(device, non_blocking=True) # Enable asynchronous data transfers to GPU from pinned memory
+            y = generator(x)
 
-            x = x.to(device)
-            y = transformer(x)
+            features_tuple_y = vgg(y)
+            features_tuple_x = vgg(x)
 
-            y = utils.normalize_batch(y)
-            x = utils.normalize_batch(x)
-
-            features_y = vgg(y)
-            features_x = vgg(x)
-
-            content_loss = args.content_weight * mse_loss(features_y[1], features_x[1]) # relu2_2
+            content_loss = opt.content_weight * mse_loss(features_tuple_y[1], features_tuple_x[1]) # relu2_2
 
             style_loss = 0.
-            for ft_y, gm_s in zip(features_y, gram_style):
-                gm_y = utils.compute_gram_matrix(ft_y)
-                style_loss += mse_loss(gm_y, gm_s[:n_batch, :, :])
-            style_loss *= args.style_weight
+            for features_y, gram_style in zip(features_tuple_y, gram_style_tuple):
+                gram_y = compute_gram_matrix(features_y)
+                # Makes sure gram_style is the same size even for last batch
+                style_loss += mse_loss(gram_y, gram_style[:num_in_batch, :, :])
+            style_loss *= opt.style_weight
 
             total_loss = content_loss + style_loss
             total_loss.backward()
             optimizer.step()
 
-            agg_content_loss += content_loss.item()
-            agg_style_loss += style_loss.item()
+            if (batch_id + 1) % opt.log_interval == 0:
+                msg = "{}\tEpoch {}:\t[{}/{}]".format(time.ctime(), epoch + 1, img_count, len(train_dataset))
+                print(msg)
 
-            if args.checkpoint_model_dir is not None and (batch_id + 1) % args.checkpoint_interval == 0:
-                transformer.eval().cpu()
-                ckpt_model_filename = "ckpt_epoch_" + str(e) + "_batch_id_" + str(batch_id + 1) + ".pth"
-                ckpt_model_path = os.path.join(args.checkpoint_model_dir, ckpt_model_filename)
-                torch.save(transformer.state_dict(), ckpt_model_path)
-                transformer.to(device).train()
-
-    transformer.eval().cpu()
-    save_model_filename = "epoch_" + str(args.epochs) + "_" + str(time.ctime()).replace(' ', '_') + "_" + str(
-        args.content_weight) + "_" + str(args.style_weight) + ".model"
-    save_model_path = os.path.join(args.save_model_dir, save_model_filename)
-    torch.save(transformer.state_dict(), save_model_path)
-
-    print("\nDone, trained model saved at", save_model_path)
+    generator.eval().cpu() # Set training = False and move generator to cpu to save model
+    save_model_filename = "epoch_" + str(opt.epochs) + "_" + str(time.ctime()).replace(' ', '-').replace(':', '') + ".pth"
+    save_model_path = os.path.join(opt.save_model_dir, save_model_filename)
+    torch.save(generator.state_dict(), save_model_path)
+    print("Training Complete")
