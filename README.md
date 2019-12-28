@@ -23,28 +23,20 @@ python src/train.py --cuda 1 --datasets/train2014 --save_model_dir saved_models/
 ------------
 
     ├── LICENSE
-    ├── Makefile           <- Makefile with commands like `make data` or `make train`
+    ├── requirements.txt   <- Use `pip install -r requirements.txt`
     ├── README.md
-    ├── data
-    │   └── raw            <- Raw data before any processing
-    │
-    ├── saved_models       <- Checkpointed models and tensorboard summaries
-    │
+    ├── Dockerfile         <- Download this file and use `docker build` to create a Docker image with all dependencies.
     ├── setup.py           <- makes project pip installable (pip install -e .) so src can be imported
     └── src                <- Source code for use in this project
         ├── __init__.py    <- Makes src a Python module
         │
         ├── train.py       <- Run this to train
         │
-        ├── test.py        <- Run this to test
-        │
-        ├── pipeline       <- Code for downloading or loading data  
+        ├── stylize.py     <- Run this to stylize images given a trained model.
         │
         ├── options        <- Files for command line options
         │
-        ├── models         <- Code for defining the network structure and loss functions
-        │
-        └── utils          <- Utility files, including scripts for visualisation
+        └── networks       <- Code for defining the network structure and loss functions
 
 --------
 
