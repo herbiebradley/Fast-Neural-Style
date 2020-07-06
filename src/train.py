@@ -36,8 +36,8 @@ if __name__ == "__main__":
         normalise
         ])
     train_dataset = datasets.ImageFolder(opt.data_dir, transform)
-    # Use batch_size parallel workers to load the data, and use pinned memory to speed up transfer of data to GPU.
-    train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, num_workers=opt.batch_size, pin_memory=True)
+    # Use CPU count parallel workers to load the data, and use pinned memory to speed up transfer of data to GPU.
+    train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, num_workers=os.cpu_count(), pin_memory=True)
 
     style_transform = transforms.Compose([
         transforms.ToTensor(),
